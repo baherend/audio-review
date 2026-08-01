@@ -1,0 +1,66 @@
+{
+  "model_id": "elgeish_baved_vocal_activation",
+  "version": "1.0.0",
+  "architecture": {
+    "backbone": "Wav2Vec2-Large-XLSR-53",
+    "backbone_name": "elgeish/wav2vec2-large-xlsr-53-arabic",
+    "head": "BiLSTM + Linear Classifier",
+    "bilstm": {
+      "input_size": 1024,
+      "hidden_size": 50,
+      "num_layers": 1,
+      "bidirectional": true
+    },
+    "pooling_type": "masked_mean",
+    "dropout": 0.2,
+    "classifier": {
+      "input_size": 100,
+      "output_size": 3
+    },
+    "sampling_rate": 16000
+  },
+  "labels": {
+    "0": "Low Vocal Activation",
+    "1": "Moderate Vocal Activation",
+    "2": "High Vocal Activation"
+  },
+  "source_checkpoint": {
+    "path": "experiments/emotion_type/candidate_screening/elgeish_baved/01_training_implementation/outputs/checkpoint-1695/model.safetensors",
+    "dtype": "torch.float32",
+    "size_bytes": 1263531004,
+    "tensor_count": 432
+  },
+  "deployment_artifact": {
+    "path": "artifacts/models/vocal_activation/elgeish_baved_v1/model_bundle_fp16.pt",
+    "dtype": "torch.float16",
+    "size_bytes": 631885082,
+    "tensor_count": 432,
+    "sha256": "d787347778c67f9b9f98322d3ef423c308f091e1eb678766f9f21e0517878380"
+  },
+  "conversion": {
+    "source_dtype": "torch.float32",
+    "deployment_dtype": "torch.float16",
+    "size_reduction_bytes": 631645922,
+    "size_reduction_percentage": 50.0
+  },
+  "evaluation": {
+    "test_accuracy": 0.5986,
+    "test_macro_f1": 0.6007,
+    "evaluation_protocol": "speaker-disjoint test"
+  },
+  "known_limitation": "High Vocal Activation is frequently confused with Moderate Vocal Activation.",
+  "integration_status": "integrated_validated",
+  "validation_metadata": {
+    "strict_loading": true,
+    "masked_pooling_parity": true,
+    "fp32_fp16_logits_parity": true,
+    "real_inference_smoke": true,
+    "end_to_end_pipeline": true,
+    "streamlit_startup": true,
+    "validation_date": "2026-07-31",
+    "tested_runtime_target": "Streamlit",
+    "focused_test_total": 154,
+    "focused_test_passed": 154,
+    "focused_test_failed": 0
+  }
+}

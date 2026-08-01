@@ -1,0 +1,89 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python environments and installed packages
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+site-packages/
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# IDE, assistant, and OS-specific state
+.vscode/
+.idea/
+.claude/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+~$*
+tmp*/
+
+# Model caches and downloaded repositories
+.cache/
+.emotion-type-cache/
+huggingface/
+transformers_cache/
+torch_cache/
+
+# Large model weights and checkpoints
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+*.onnx
+/models/
+/checkpoints/
+
+# Datasets, raw media, and training outputs
+/data/
+/datasets/
+/experiments/
+/runs/
+/training_outputs/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.mp4
+
+# Generated exports and reports
+/outputs/
+/results/
+/exports/
+*.generated.json
+*.generated.pdf
+
+# Archives and local tunnels
+*.zip
+*.7z
+*.tar
+*.tar.gz
+.ngrok2/
+ngrok.yml
+ngrok.yaml
+

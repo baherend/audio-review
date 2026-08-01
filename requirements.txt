@@ -1,0 +1,12 @@
+# Runtime dependencies for the canonical Streamlit application.
+numpy>=1.24,<3
+torch>=2.0
+transformers>=4.30,<6
+librosa>=0.10
+soundfile>=0.12
+streamlit>=1.57
+reportlab>=4.0
+
+# Test runner for the included reviewer tests.
+pytest>=8.0
+
