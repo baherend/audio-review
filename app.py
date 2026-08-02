@@ -31,7 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.inference.engine import EmotionEngine
-from src.demo.stereo_loader import load_stereo_audio
+from src.demo.stereo_loader import AudioInputError, load_stereo_audio
 from src.demo.speaker_processor import process_stereo_call
 from src.demo.speaker_summary import (
     compute_speaker_summary,
@@ -53,6 +53,7 @@ from src.demo.schemas import (
     HoldPolicyConfig,
     OperationalAlertConfig,
     FinalCallReviewConfig,
+    StereoLoadResult,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -306,28 +307,105 @@ def _display_validation(validation):
 # PIPELINE ORCHESTRATION
 # ══════════════════════════════════════════════════════════════════════
 
+_GENERIC_AUDIO_VALIDATION_MESSAGE = (
+    "The uploaded file could not be validated as stereo audio. "
+    "Choose a valid WAV file with Left=Agent and Right=Customer."
+)
+
+
+def _validation_failure(
+    error_code: str,
+    error_message: str,
+    load_result: Optional[StereoLoadResult] = None,
+) -> Dict[str, Any]:
+    """Return the single failure contract used for rejected audio."""
+    return {
+        "error": "validation_failed",
+        "error_code": error_code,
+        "error_message": error_message,
+        "load_result": load_result,
+    }
+
+
+def _validation_failure_from_load_result(
+    load_result: StereoLoadResult,
+) -> Dict[str, Any]:
+    """Convert a typed validation rejection to the shared failure contract."""
+    validation_errors = load_result.validation.errors
+    if validation_errors:
+        first_error = validation_errors[0]
+        return _validation_failure(
+            first_error.code,
+            first_error.message,
+            load_result=load_result,
+        )
+    return _validation_failure(
+        "INVALID_AUDIO",
+        _GENERIC_AUDIO_VALIDATION_MESSAGE,
+        load_result=load_result,
+    )
+
+
+def validate_uploaded_audio(
+    source: Any,
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Decode and validate user audio without initializing the model."""
+    try:
+        load_result = load_stereo_audio(source, filename=filename)
+    except AudioInputError as exc:
+        return _validation_failure(exc.code, str(exc))
+    except (FileNotFoundError, OSError, ValueError):
+        return _validation_failure(
+            "INVALID_AUDIO",
+            _GENERIC_AUDIO_VALIDATION_MESSAGE,
+        )
+
+    if not load_result.validation.is_valid:
+        return _validation_failure_from_load_result(load_result)
+    return {"load_result": load_result}
+
+
+def _display_audio_validation_failure(result: Dict[str, Any]) -> None:
+    """Display a validation failure without assuming decoded audio exists."""
+    st.header("🔍 Validation Results")
+    load_result = result.get("load_result")
+    if load_result is not None:
+        _display_validation(load_result.validation)
+        return
+
+    st.error("❌ Stereo validation failed")
+    st.error(result.get("error_message", _GENERIC_AUDIO_VALIDATION_MESSAGE))
+
+
 def run_pipeline(
     audio_path: str,
     engine: EmotionEngine,
     call_type: str = "unknown",
     call_id: Optional[str] = None,
+    prevalidated_load_result: Optional[StereoLoadResult] = None,
 ) -> Dict[str, Any]:
     """Run the full Audio Intelligence pipeline. Returns all results."""
     results = {}
 
     # 1. Load and validate stereo audio
-    try:
-        load_result = load_stereo_audio(audio_path)
-    except ValueError as e:
-        results["error"] = "validation_failed"
-        results["error_message"] = str(e)
-        return results
+    if prevalidated_load_result is None:
+        validation_result = validate_uploaded_audio(audio_path)
+        if validation_result.get("error") == "validation_failed":
+            return validation_result
+        load_result = validation_result.get("load_result")
+    else:
+        load_result = prevalidated_load_result
+
+    if load_result is None:
+        return _validation_failure(
+            "INVALID_AUDIO",
+            _GENERIC_AUDIO_VALIDATION_MESSAGE,
+        )
+    if not load_result.validation.is_valid:
+        return _validation_failure_from_load_result(load_result)
 
     results["load_result"] = load_result
-
-    if not load_result.validation.is_valid:
-        results["error"] = "validation_failed"
-        return results
 
     # 2. Process stereo call (windows + speech activity + SER)
     window_config = WindowConfig()
@@ -733,6 +811,25 @@ def main():
                     tmp.write(uploaded_file.read())
                     tmp_path = tmp.name
 
+                # Validate user-controlled audio before any model initialization.
+                validation_result = validate_uploaded_audio(
+                    tmp_path,
+                    filename=uploaded_file.name,
+                )
+                if validation_result.get("error") == "validation_failed":
+                    _display_audio_validation_failure(validation_result)
+                    st.stop()
+
+                load_result = validation_result.get("load_result")
+                if load_result is None:
+                    _display_audio_validation_failure(
+                        _validation_failure(
+                            "INVALID_AUDIO",
+                            _GENERIC_AUDIO_VALIDATION_MESSAGE,
+                        )
+                    )
+                    st.stop()
+
                 # Load engine
                 engine = load_engine()
                 if engine is None:
@@ -749,6 +846,7 @@ def main():
                         engine=engine,
                         call_type=call_type,
                         call_id=call_id or None,
+                        prevalidated_load_result=load_result,
                     )
                     elapsed = time.time() - t0
                 except Exception as e:
@@ -760,8 +858,7 @@ def main():
                     progress.empty()
 
                 if results.get("error") == "validation_failed":
-                    st.header("🔍 Validation Results")
-                    _display_validation(results["load_result"].validation)
+                    _display_audio_validation_failure(results)
                     st.stop()
 
                 # Store results in session
@@ -783,13 +880,17 @@ def main():
         return
 
     results = st.session_state.results
+    load_result = results.get("load_result")
+    if load_result is None:
+        st.error(_GENERIC_AUDIO_VALIDATION_MESSAGE)
+        return
 
     # ── Input Information Card ──────────────────────────────────────
     st.markdown('<div class="section-card section-card-accent-teal">', unsafe_allow_html=True)
     with st.expander("📎 Input Information", expanded=True):
         st.markdown(f"**File:** {st.session_state.get('filename', '—')}")
         st.markdown(f"**Processing time:** {st.session_state.get('elapsed', 0):.1f}s")
-        _display_validation(results["load_result"].validation)
+        _display_validation(load_result.validation)
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Call Overview Card ──────────────────────────────────────────

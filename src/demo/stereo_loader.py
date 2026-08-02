@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import BinaryIO, Optional, Union
 
 import numpy as np
+import soxr
 
 from .schemas import (
     OriginalStereoAudio,
@@ -18,6 +19,59 @@ from .schemas import (
     StereoValidationConfig,
 )
 from .channel_validation import validate_stereo
+
+
+class AudioInputError(ValueError):
+    """Controlled validation error for audio supplied by a user."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+def _reject_truncated_wav(header: bytes, actual_size: int) -> None:
+    """Reject RIFF WAV files whose declared container length is unavailable."""
+    if len(header) < 12 or header[8:12] != b"WAVE":
+        return
+    if header[:4] == b"RIFF":
+        byte_order = "little"
+    elif header[:4] == b"RIFX":
+        byte_order = "big"
+    else:
+        return
+
+    declared_size = int.from_bytes(header[4:8], byteorder=byte_order)
+    if declared_size not in (0, 0xFFFFFFFF) and declared_size + 8 > actual_size:
+        raise AudioInputError(
+            "INVALID_AUDIO",
+            "Could not decode audio. The file may be corrupt, incomplete, "
+            "or use an unsupported encoding.",
+        )
+
+
+def _resample_channel_for_model(
+    waveform: np.ndarray,
+    original_sr: int,
+    target_sr: int = 16000,
+) -> np.ndarray:
+    """Resample one channel with SoXR HQ and preserve the prior output contract."""
+    expected_samples = int(
+        np.ceil(waveform.shape[0] * (float(target_sr) / original_sr))
+    )
+    resampled = soxr.resample(
+        waveform,
+        in_rate=original_sr,
+        out_rate=target_sr,
+        quality="HQ",
+    )
+    if resampled.shape[0] < expected_samples:
+        resampled = np.pad(
+            resampled,
+            (0, expected_samples - resampled.shape[0]),
+        )
+    elif resampled.shape[0] > expected_samples:
+        resampled = resampled[:expected_samples]
+    return np.asarray(resampled, dtype=np.float32)
 
 
 def load_stereo_audio(
@@ -44,11 +98,9 @@ def load_stereo_audio(
         StereoLoadResult with original audio, model audio, validation, and role info.
 
     Raises:
-        ValueError: If input is mono, has >2 channels, or cannot be decoded.
+        AudioInputError: If input is empty, corrupt, mono, or not stereo.
         FileNotFoundError: If file path does not exist.
     """
-    import librosa
-
     if config is None:
         config = StereoValidationConfig()
 
@@ -60,10 +112,24 @@ def load_stereo_audio(
         if filename is None:
             filename = path.name
         file_format = path.suffix.lstrip(".").lower() or "unknown"
+        file_size = path.stat().st_size
+        if file_size == 0:
+            raise AudioInputError(
+                "EMPTY_FILE",
+                "The uploaded audio file is empty. Choose a non-empty stereo WAV file.",
+            )
+        with path.open("rb") as audio_file:
+            _reject_truncated_wav(audio_file.read(12), file_size)
     elif hasattr(source, "read"):
         # BinaryIO — read all bytes into a buffer
         source.seek(0)
         audio_bytes = source.read()
+        if not audio_bytes:
+            raise AudioInputError(
+                "EMPTY_FILE",
+                "The uploaded audio file is empty. Choose a non-empty stereo WAV file.",
+            )
+        _reject_truncated_wav(audio_bytes[:12], len(audio_bytes))
         buffer = io.BytesIO(audio_bytes)
         if filename is None:
             filename = "uploaded_audio"
@@ -74,50 +140,79 @@ def load_stereo_audio(
 
     # ── Decode audio ───────────────────────────────────────────────────
     try:
-        if path is not None:
-            waveform, original_sr = librosa.load(
-                str(path), sr=None, mono=False
+        import soundfile as sf
+
+        decode_source = str(path) if path is not None else buffer
+        audio_info = sf.info(decode_source)
+        if audio_info.frames <= 0:
+            raise AudioInputError(
+                "EMPTY_FILE",
+                "The uploaded audio file is empty. Choose a non-empty stereo WAV file.",
             )
-        else:
-            # For BinaryIO, librosa needs a file path or file-like with proper handling
-            # Write to a temporary in-memory buffer for librosa
+        if audio_info.channels == 1:
+            raise AudioInputError(
+                "MONO_INPUT",
+                "Stereo audio is required. The file contains one channel. "
+                "Left must be Agent and Right must be Customer.",
+            )
+        if audio_info.channels != 2:
+            raise AudioInputError(
+                "UNSUPPORTED_CHANNEL_COUNT",
+                "Audio must have exactly 2 channels. Multi-channel files are not supported. "
+                "Left must be Agent and Right must be Customer.",
+            )
+
+        if path is None:
             buffer.seek(0)
-            waveform, original_sr = librosa.load(
-                buffer, sr=None, mono=False
-            )
+        waveform, original_sr = sf.read(
+            decode_source,
+            dtype="float32",
+            always_2d=True,
+        )
+        waveform = waveform.T
+    except AudioInputError:
+        raise
     except Exception as e:
-        raise ValueError(f"Could not decode audio: {e}") from e
+        raise AudioInputError(
+            "INVALID_AUDIO",
+            "Could not decode audio. The file may be corrupt, incomplete, "
+            "or use an unsupported encoding.",
+        ) from e
 
     # ── Normalize orientation to (channels, samples) ───────────────────
     if waveform.ndim == 1:
         # Mono — rejected
-        raise ValueError(
-            "Stereo audio required for two-speaker demo. "
-            "Received mono audio (1 channel)."
+        raise AudioInputError(
+            "MONO_INPUT",
+            "Stereo audio is required. The file contains one channel. "
+            "Left must be Agent and Right must be Customer.",
         )
     elif waveform.ndim == 2:
-        # Check orientation: librosa returns (channels, samples) when mono=False
-        # Verify which axis is channels
+        # SoundFile is read with always_2d=True and transposed above.
+        # Retain a defensive check for an unexpected (samples, channels) layout.
         if waveform.shape[0] > waveform.shape[1]:
             # Transpose: likely (samples, channels) from some loaders
             waveform = waveform.T
     else:
-        raise ValueError(
-            f"Unexpected audio shape: {waveform.shape}. "
-            "Expected 1D (mono) or 2D (stereo)."
+        raise AudioInputError(
+            "INVALID_AUDIO",
+            "Could not decode audio. The file may be corrupt, incomplete, "
+            "or use an unsupported encoding.",
         )
 
     # ── Validate channel count ─────────────────────────────────────────
     n_channels = waveform.shape[0]
     if n_channels == 1:
-        raise ValueError(
-            "Stereo audio required for two-speaker demo. "
-            "Received mono audio (1 channel)."
+        raise AudioInputError(
+            "MONO_INPUT",
+            "Stereo audio is required. The file contains one channel. "
+            "Left must be Agent and Right must be Customer.",
         )
     if n_channels > 2:
-        raise ValueError(
-            f"Audio must have exactly 2 channels, got {n_channels}. "
-            "Multi-channel files are not supported."
+        raise AudioInputError(
+            "UNSUPPORTED_CHANNEL_COUNT",
+            "Audio must have exactly 2 channels. Multi-channel files are not supported. "
+            "Left must be Agent and Right must be Customer.",
         )
 
     # ── Create OriginalStereoAudio ─────────────────────────────────────
@@ -160,12 +255,8 @@ def load_stereo_audio(
 
     # ── Resample to 16 kHz for model ──────────────────────────────────
     if original_sr != 16000:
-        agent_model = librosa.resample(
-            agent_channel, orig_sr=original_sr, target_sr=16000
-        ).astype(np.float32)
-        customer_model = librosa.resample(
-            customer_channel, orig_sr=original_sr, target_sr=16000
-        ).astype(np.float32)
+        agent_model = _resample_channel_for_model(agent_channel, original_sr)
+        customer_model = _resample_channel_for_model(customer_channel, original_sr)
     else:
         agent_model = agent_channel.astype(np.float32)
         customer_model = customer_channel.astype(np.float32)

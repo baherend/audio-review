@@ -16,7 +16,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.demo.stereo_loader import load_stereo_audio
+from src.demo.stereo_loader import AudioInputError, load_stereo_audio
 from src.demo.schemas import (
     StereoLoadResult,
     OriginalStereoAudio,
@@ -208,8 +208,37 @@ class TestRejection:
         path = os.path.join(SCRATCHPAD, "test_corrupt.wav")
         with open(path, "wb") as f:
             f.write(b"this is not a valid audio file")
-        with pytest.raises(ValueError, match="[Cc]ould not decode"):
+        with pytest.raises(AudioInputError, match="[Cc]ould not decode") as exc_info:
             load_stereo_audio(path)
+        assert exc_info.value.code == "INVALID_AUDIO"
+
+    def test_zero_byte_file_rejection(self, tmp_path):
+        """A zero-byte upload is rejected with a controlled error."""
+        path = tmp_path / "empty.wav"
+        path.write_bytes(b"")
+
+        with pytest.raises(AudioInputError) as exc_info:
+            load_stereo_audio(path)
+
+        assert exc_info.value.code == "EMPTY_FILE"
+        assert "empty" in str(exc_info.value).lower()
+
+    def test_truncated_wav_rejection(self):
+        """A truncated WAV header is rejected without backend diagnostics."""
+        complete = io.BytesIO()
+        signal = np.column_stack([
+            np.ones(16000, dtype=np.float32) * 0.1,
+            np.ones(16000, dtype=np.float32) * -0.1,
+        ])
+        sf.write(complete, signal, 16000, format="WAV")
+        wav_bytes = complete.getvalue()
+        truncated = io.BytesIO(wav_bytes[:len(wav_bytes) // 2])
+
+        with pytest.raises(AudioInputError) as exc_info:
+            load_stereo_audio(truncated, filename="truncated.wav")
+
+        assert exc_info.value.code == "INVALID_AUDIO"
+        assert "truncated.wav" not in str(exc_info.value)
 
 
 # ══════════════════════════════════════════════════════════════════════

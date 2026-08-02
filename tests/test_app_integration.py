@@ -9,11 +9,13 @@ Verifies:
 - No banned output labels or scoring terms
 """
 
+import io
 import os
 import sys
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -173,6 +175,119 @@ class TestSerialization:
         parsed = json.loads(json_str)
         assert parsed["call_duration_sec"] == 60.0
         assert parsed["call_type"] == "technical"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# INVALID UPLOAD HANDLING — AUDIO-015
+# ═══════════════════════════════════════════════════════════════════════
+
+def _wav_upload_bytes(channels: int = 2, duration_sec: float = 1.0) -> bytes:
+    """Return a deterministic in-memory WAV without touching the model."""
+    import soundfile as sf
+
+    sample_rate = 16000
+    sample_count = int(sample_rate * duration_sec)
+    timeline = np.linspace(0, duration_sec, sample_count, endpoint=False)
+    channel_data = [
+        (0.2 * np.sin(2 * np.pi * (220 + 110 * index) * timeline)).astype(np.float32)
+        for index in range(channels)
+    ]
+    audio = channel_data[0] if channels == 1 else np.column_stack(channel_data)
+    buffer = io.BytesIO()
+    sf.write(buffer, audio, sample_rate, format="WAV")
+    return buffer.getvalue()
+
+
+class TestInvalidUploadHandling:
+    """Invalid audio is rejected before model initialization and without UI crashes."""
+
+    @staticmethod
+    def _validate(payload: bytes, filename: str = "upload.wav"):
+        from app import validate_uploaded_audio
+
+        return validate_uploaded_audio(io.BytesIO(payload), filename=filename)
+
+    @staticmethod
+    def _assert_failure_contract(result, expected_code: str):
+        assert set(result) == {
+            "error", "error_code", "error_message", "load_result",
+        }
+        assert result["error"] == "validation_failed"
+        assert result["error_code"] == expected_code
+        assert result["load_result"] is None
+        assert result["error_message"]
+        assert PROJECT_ROOT not in result["error_message"]
+
+    def test_zero_byte_file(self):
+        result = self._validate(b"", "empty.wav")
+        self._assert_failure_contract(result, "EMPTY_FILE")
+
+    def test_random_bytes(self):
+        result = self._validate(b"not a wav file\x00\x01", "random.wav")
+        self._assert_failure_contract(result, "INVALID_AUDIO")
+
+    def test_truncated_wav(self):
+        wav_bytes = _wav_upload_bytes()
+        result = self._validate(wav_bytes[:len(wav_bytes) // 2], "truncated.wav")
+        self._assert_failure_contract(result, "INVALID_AUDIO")
+
+    def test_mono_wav(self):
+        result = self._validate(_wav_upload_bytes(channels=1), "mono.wav")
+        self._assert_failure_contract(result, "MONO_INPUT")
+
+    def test_more_than_two_channels(self):
+        result = self._validate(_wav_upload_bytes(channels=4), "four-channel.wav")
+        self._assert_failure_contract(result, "UNSUPPORTED_CHANNEL_COUNT")
+
+    def test_valid_stereo_wav(self):
+        result = self._validate(_wav_upload_bytes(channels=2), "stereo.wav")
+
+        assert "error" not in result
+        load_result = result.get("load_result")
+        assert load_result is not None
+        assert load_result.validation.is_valid
+        assert load_result.role_assignment_method == "channel_convention"
+        assert load_result.original_audio.waveform.shape[0] == 2
+
+    def test_invalid_audio_wins_when_model_is_missing(self, monkeypatch, tmp_path):
+        from streamlit.testing.v1 import AppTest
+
+        missing_model = tmp_path / "missing-model.pt"
+        monkeypatch.setenv("AUDIO_MODEL_PATH", str(missing_model))
+        at = AppTest.from_file(Path(PROJECT_ROOT) / "app.py", default_timeout=15)
+        at.run()
+        at.file_uploader[0].set_value(("empty.wav", b"", "audio/wav")).run()
+        at.button[0].click().run()
+
+        errors = "\n".join(str(item.value) for item in at.error)
+        assert "Stereo validation failed" in errors
+        assert "empty" in errors.lower()
+        assert "Model file not found" not in errors
+        assert str(missing_model) not in errors
+        assert not at.exception
+
+    def test_invalid_audio_never_initializes_model_or_raises_key_error(self):
+        from streamlit.testing.v1 import AppTest
+
+        initialized = []
+
+        class EngineMustNotInitialize:
+            def __init__(self, *args, **kwargs):
+                initialized.append(True)
+                raise AssertionError("model initialized before audio validation")
+
+        with patch("src.inference.engine.EmotionEngine", EngineMustNotInitialize):
+            at = AppTest.from_file(Path(PROJECT_ROOT) / "app.py", default_timeout=15)
+            at.run()
+            at.file_uploader[0].set_value(
+                ("random.wav", b"not a wav file", "audio/wav")
+            ).run()
+            at.button[0].click().run()
+
+        assert not initialized
+        assert not at.exception
+        assert all("KeyError" not in str(item.value) for item in at.exception)
+        assert any("Stereo validation failed" in str(item.value) for item in at.error)
 
 
 # ══════════════════════════════════════════════════════════════════════

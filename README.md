@@ -151,7 +151,6 @@ Use the PDF download button to generate the evidence-only Team Leader report bui
 - The Hold autocorrelation implementation is quadratic on up to 80,000 samples and can be slow.
 - High Vocal Activation is frequently confused with Moderate; the supplied manifest reports 0.5986 accuracy and 0.6007 macro-F1 on its speaker-disjoint evaluation.
 - Per-window inference exceptions can be silently omitted from summaries.
-- Invalid decoded uploads can reach a Streamlit `KeyError` in the current error-display path.
 - Streamlit session results are not keyed to the selected upload and can remain stale until a new run completes.
 - Temporary audio is written under the project directory and normally deleted, but a hard process failure could leave it behind.
 - Review status/manual-review fields and exported Hold counting mode have known consistency defects documented in the external audit.
@@ -177,5 +176,5 @@ This system provides review evidence only. It does not produce official QA score
 
 ## License and submission note
 
-Project code is supplied under the repository's MIT license. The license file does not name a rights holder, and it does not establish permission to redistribute datasets, voices, third-party models, or derived weights. The application source in this package is copied unchanged from the audited canonical implementation; the README, model instructions, dependency list, environment example, and ignore rules are submission-specific replacements.
+Project code is supplied under the repository's MIT license. The license file does not name a rights holder, and it does not establish permission to redistribute datasets, voices, third-party models, or derived weights. The README, model instructions, dependency list, environment example, and ignore rules are submission-specific replacements.
 
