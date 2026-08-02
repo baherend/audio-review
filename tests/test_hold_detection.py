@@ -8,6 +8,7 @@ full 340.5-second synthetic call scenario.
 
 import os
 import sys
+import time
 import numpy as np
 import pytest
 
@@ -16,7 +17,11 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.demo.schemas import ActivityInterval, HoldDetectionConfig
-from src.demo.hold_detection import detect_hold_candidates, _compute_audio_features
+from src.demo.hold_detection import (
+    detect_hold_candidates,
+    _compute_audio_features,
+    _normalized_autocorrelation_at_lag,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -80,6 +85,117 @@ def _config(**kwargs):
     }
     defaults.update(kwargs)
     return HoldDetectionConfig(**defaults)
+
+
+def _legacy_full_correlation_score(signal: np.ndarray, lag: int) -> float:
+    """Reference implementation retained only for short-array parity tests."""
+    if lag <= 0 or len(signal) <= lag:
+        return 0.0
+    autocorr = np.correlate(signal, signal, mode="full")
+    autocorr = autocorr[len(autocorr) // 2:]
+    return float(autocorr[lag] / (autocorr[0] + 1e-8))
+
+
+def _make_repetition_signal(kind: str, sample_rate: int, sample_count: int) -> np.ndarray:
+    """Create deterministic short signals for one-lag parity tests."""
+    timeline = np.arange(sample_count, dtype=np.float64) / sample_rate
+    if kind == "constant_tone":
+        signal = 0.4 * np.sin(2 * np.pi * 8 * timeline)
+    elif kind == "periodic_tone":
+        signal = (
+            0.3 * np.sin(2 * np.pi * 3 * timeline)
+            + 0.2 * np.sin(2 * np.pi * 7 * timeline)
+            + 0.1 * np.sin(2 * np.pi * 12 * timeline)
+        )
+    elif kind == "white_noise":
+        signal = np.random.default_rng(10).standard_normal(sample_count) * 0.1
+    elif kind == "speech_like":
+        rng = np.random.default_rng(11)
+        envelope = 0.55 + 0.4 * np.sin(2 * np.pi * 1.3 * timeline)
+        signal = envelope * (
+            0.3 * np.sin(2 * np.pi * 5 * timeline)
+            + 0.12 * np.sin(2 * np.pi * 11 * timeline)
+        ) + 0.02 * rng.standard_normal(sample_count)
+    else:  # pragma: no cover - test helper contract
+        raise ValueError(f"Unknown signal kind: {kind}")
+    return signal.astype(np.float32)
+
+
+class TestSingleLagAutocorrelation:
+    """The direct one-second lag preserves the former score without quadratic work."""
+
+    @pytest.mark.parametrize(
+        "signal_kind",
+        ["constant_tone", "periodic_tone", "white_noise", "speech_like"],
+    )
+    def test_numerical_parity_with_legacy_full_correlation(self, signal_kind):
+        lag = 64
+        signal = _make_repetition_signal(signal_kind, lag, 257)
+
+        expected = _legacy_full_correlation_score(signal, lag)
+        actual = _normalized_autocorrelation_at_lag(signal, lag)
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+        assert np.isfinite(actual)
+        assert -1.0 <= actual <= 1.0
+
+    def test_silence_and_zero_energy_denominator_return_zero(self):
+        score = _normalized_autocorrelation_at_lag(
+            np.zeros(257, dtype=np.float32),
+            64,
+        )
+        assert score == 0.0
+        assert np.isfinite(score)
+
+    def test_empty_input_returns_zero(self):
+        assert _normalized_autocorrelation_at_lag(
+            np.array([], dtype=np.float32),
+            64,
+        ) == 0.0
+
+    @pytest.mark.parametrize("invalid_lag", [0, -1, 1.5, None])
+    def test_invalid_lag_returns_zero(self, invalid_lag):
+        signal = np.ones(128, dtype=np.float32)
+        assert _normalized_autocorrelation_at_lag(signal, invalid_lag) == 0.0
+
+    @pytest.mark.parametrize("sample_count", [63, 64])
+    def test_input_not_longer_than_required_lag_returns_zero(self, sample_count):
+        signal = np.ones(sample_count, dtype=np.float32)
+        assert _normalized_autocorrelation_at_lag(signal, 64) == 0.0
+
+    def test_underflowed_energy_denominator_returns_zero(self):
+        signal = np.full(257, 1e-30, dtype=np.float32)
+        assert _normalized_autocorrelation_at_lag(signal, 64) == 0.0
+
+    @pytest.mark.parametrize("nonfinite", [np.nan, np.inf, -np.inf])
+    def test_nonfinite_signal_returns_finite_zero(self, nonfinite):
+        signal = np.ones(257, dtype=np.float32)
+        signal[10] = nonfinite
+        score = _normalized_autocorrelation_at_lag(signal, 64)
+        assert score == 0.0
+        assert np.isfinite(score)
+
+    def test_five_second_input_is_linear_and_avoids_full_correlation(self, monkeypatch):
+        sample_rate = 16000
+        signal = np.random.default_rng(12).standard_normal(
+            5 * sample_rate,
+        ).astype(np.float32)
+
+        def fail_full_correlation(*args, **kwargs):
+            raise AssertionError("Production repetition scoring must not use np.correlate")
+
+        monkeypatch.setattr(np, "correlate", fail_full_correlation)
+        score = _normalized_autocorrelation_at_lag(signal, sample_rate)
+
+        timings = []
+        for _ in range(5):
+            started = time.perf_counter()
+            _normalized_autocorrelation_at_lag(signal, sample_rate)
+            timings.append(time.perf_counter() - started)
+
+        assert np.median(timings) < 0.25
+        assert np.isfinite(score)
+        assert -1.0 <= score <= 1.0
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -305,6 +305,34 @@ def _classify_customer_state(
     return "uncertain"
 
 
+def _normalized_autocorrelation_at_lag(
+    signal: np.ndarray,
+    lag: int,
+) -> float:
+    """Return normalized autocorrelation for one positive lag in linear time."""
+    values = np.asarray(signal)
+    if (
+        values.ndim != 1
+        or values.size == 0
+        or not isinstance(lag, (int, np.integer))
+        or lag <= 0
+        or values.size <= lag
+    ):
+        return 0.0
+
+    with np.errstate(invalid="ignore", over="ignore"):
+        energy = float(np.dot(values, values))
+        if not np.isfinite(energy) or energy <= 0.0:
+            return 0.0
+
+        lag_product = float(np.dot(values[:-lag], values[lag:]))
+        score = lag_product / (energy + 1e-8)
+
+    if not np.isfinite(score):
+        return 0.0
+    return float(np.clip(score, -1.0, 1.0))
+
+
 def _compute_audio_features(waveform: np.ndarray, sample_rate: int) -> dict:
     """
     Compute lightweight audio features for Hold evidence.
@@ -339,13 +367,11 @@ def _compute_audio_features(waveform: np.ndarray, sample_rate: int) -> dict:
     # Dominant frequency stability across frames
     dominant_freq_stability = _compute_dominant_freq_stability(analysis, sample_rate)
 
-    # Repetition score (autocorrelation peak on subsample)
-    autocorr = np.correlate(analysis, analysis, mode='full')
-    autocorr = autocorr[len(autocorr)//2:]
-    if len(autocorr) > sample_rate:
-        repetition_score = float(autocorr[sample_rate] / (autocorr[0] + 1e-8))
-    else:
-        repetition_score = 0.0
+    # Repetition score at the existing one-second lag.
+    repetition_score = _normalized_autocorrelation_at_lag(
+        analysis,
+        sample_rate,
+    )
 
     return {
         "rms": rms_val,
